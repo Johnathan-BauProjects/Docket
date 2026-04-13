@@ -100,6 +100,7 @@ export default function Docket() {
   const [reportNotes, setReportNotes] = useState("");
   const [reportDate, setReportDate] = useState(new Date().toISOString().slice(0,10));
   const [loadingReport, setLoadingReport] = useState(false);
+  const [reportCache, setReportCache] = useState({}); // { "2026-04-13-professional": "report text" }
   const [prompt45, setPrompt45] = useState(null);
   const [promptInput, setPromptInput] = useState("");
   const [loadingPrompt, setLoadingPrompt] = useState(false);
@@ -167,6 +168,7 @@ export default function Docket() {
       const pc = await sbGetSetting("profCats"); if (pc) setProfCats(pc);
       const prc = await sbGetSetting("persCats"); if (prc) setPersCats(prc);
       const logo = await sbGetSetting("companyLogo"); if (logo) setCompanyLogo(logo);
+      const rc = await sbGetSetting("reportCache"); if (rc) setReportCache(rc);
       const te = await sbGetSetting("timeEntries"); if (te) setTimeEntries(te);
       const me = await sbGetSetting("mileageEntries"); if (me) setMileageEntries(me);
       const sl = await sbGetSetting("savedLocations"); if (sl) setSavedLocations(sl);
@@ -377,14 +379,16 @@ Respond ONLY with JSON: {"matchIndex":<index or null>,"matchConfidence":"high"|"
     } catch { return "Weather unavailable"; }
   };
 
-  const generateReport = async () => {
-    setView("report"); setLoadingReport(true);
+  const generateReport = async (force = false) => {
+    setView("report");
+    const cacheKey = `${reportDate}-${tab}`;
+    if (!force && reportCache[cacheKey]) { setReport(reportCache[cacheKey]); return; }
+    setLoadingReport(true);
     const selDate = new Date(reportDate + "T00:00:00").toDateString();
     const done = tasks.filter(t => t.completedAt && new Date(t.completedAt).toDateString() === selDate && t.mode === tab);
     const open = tasks.filter(t => t.status === "open" && t.mode === tab);
     const fu = tasks.filter(t => t.followUp && t.status !== "done" && t.mode === tab);
     const dayLogs = logs.filter(l => new Date(l.time).toDateString() === selDate && l.mode === tab);
-    // Get weather for active job if professional
     let weatherStr = "";
     if (tab === "professional" && activeJob) {
       const job = jobs.find(j => j.id === activeJob);
@@ -397,7 +401,11 @@ OPEN:\n${open.map(t=>`- [${t.jobLabel||t.jobId}][${t.category}]${t.deadline?` [D
 FOLLOW-UPS:\n${fu.map(t=>`- [${t.jobLabel||t.jobId}] ${t.text}${t.followUpNote?": "+t.followUpNote:""}`).join("\n")||"None"}
 ${weatherStr && weatherStr !== "Weather unavailable" ? `\nInclude weather conditions at the top of the report under the date.` : ""}
 Sections: Completed Work (by job), In Progress (by job), Follow-Ups Required. No title. Professional. Markdown.`);
-    setReport(r); setLoadingReport(false);
+    setReport(r);
+    const updatedCache = { ...reportCache, [cacheKey]: r };
+    setReportCache(updatedCache);
+    await sbSetSetting("reportCache", updatedCache);
+    setLoadingReport(false);
   };
 
   // ── Export ────────────────────────────────────────────────────
@@ -777,7 +785,7 @@ Cover the full day from first to last entry. If only one job, one block is fine.
         <div style={S.sideSection}>
           <button style={{...S.sideBtn,...(view==="followups"?S.sideBtnActive:{})}} onClick={()=>navTo("followups")}><span style={S.icon}>⚑</span> Follow-Ups{fuTasks.length>0&&<span style={{...S.pill,background:"#3a3a3a",color:"#ddd"}}>{fuTasks.length}</span>}</button>
           <button style={{...S.sideBtn,...(view==="dailylog"?S.sideBtnActive:{})}} onClick={()=>navTo("dailylog")}><span style={S.icon}>◈</span> Daily Log{logs.filter(l=>new Date(l.time).toDateString()===todayStr()).length>0&&<span style={S.pill}>{logs.filter(l=>new Date(l.time).toDateString()===todayStr()).length}</span>}</button>
-          <button style={{...S.sideBtn,...(view==="report"?S.sideBtnActive:{})}} onClick={()=>{setView("report");generateReport();setSidebarOpen(false);}}><span style={S.icon}>≡</span> Daily Report</button>
+          <button style={{...S.sideBtn,...(view==="report"?S.sideBtnActive:{})}} onClick={()=>{generateReport(false);setSidebarOpen(false);}}><span style={S.icon}>≡</span> Daily Report</button>
           <button style={{...S.sideBtn,...(view==="timesheet"?S.sideBtnActive:{})}} onClick={()=>navTo("timesheet")}><span style={S.icon}>◷</span> Timesheet</button>
           <button style={{...S.sideBtn,...(view==="mileage"?S.sideBtnActive:{})}} onClick={()=>navTo("mileage")}><span style={S.icon}>⊙</span> Mileage Log</button>
           <button style={{...S.sideBtn,...(view==="archive"?S.sideBtnActive:{})}} onClick={()=>navTo("archive")}><span style={S.icon}>◫</span> Archive{archive.length>0&&<span style={S.pill}>{archive.length}</span>}</button>
@@ -942,7 +950,7 @@ Cover the full day from first to last entry. If only one job, one block is fine.
                 <div style={{display:"flex",gap:10,marginTop:8,flexWrap:"wrap"}}>
                   <button style={S.btnPrimary} onClick={()=>{generateMorningSummary();}}>☀ Morning Briefing</button>
                   <button style={S.btnGhost} onClick={()=>setShowManualLog(true)}>✎ Add Log Entry</button>
-                  <button style={S.btnGhost} onClick={()=>{setView("report");generateReport();}}>≡ Daily Report</button>
+                  <button style={S.btnGhost} onClick={()=>generateReport(false)}>≡ Daily Report</button>
                 </div>
               </div>
             );
@@ -1010,14 +1018,14 @@ Cover the full day from first to last entry. If only one job, one block is fine.
             <div style={S.reportWrap}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12,flexWrap:"wrap",gap:8}}>
                 <div style={{display:"flex",alignItems:"center",gap:10}}>
-                  <input type="date" style={{...S.fSelect,fontSize:11}} value={reportDate} onChange={e=>{setReportDate(e.target.value);}}/>
-                  <button style={S.btnGhost} onClick={generateReport}>Load</button>
+                  <input type="date" style={{...S.fSelect,fontSize:11}} value={reportDate} onChange={e=>{ const d=e.target.value; setReportDate(d); setReport(reportCache[`${d}-${tab}`]||""); }}/>
+                  <button style={S.btnGhost} onClick={()=>generateReport(false)}>{reportCache[`${reportDate}-${tab}`]?"View Cached":"Generate"}</button>
                 </div>
                 <button style={S.btnGhost} onClick={openExport}>↗ Export</button>
               </div>
               <textarea style={{...S.fInput,width:"100%",marginBottom:16,fontSize:12}} placeholder="Add report notes (optional — appears at top of export)…" value={reportNotes} onChange={e=>setReportNotes(e.target.value)} rows={2}/>
               {loadingReport?<div style={S.muted}>Generating report…</div>:<div className="report-body" dangerouslySetInnerHTML={{__html:mdToHtml(report)}}/>}
-              {!loadingReport&&<button style={{...S.btnGhost,marginTop:24}} onClick={generateReport}>↻ Regenerate</button>}
+              {!loadingReport&&<button style={{...S.btnGhost,marginTop:24}} onClick={()=>generateReport(true)}>↻ Regenerate</button>}
             </div>
           )}
 
