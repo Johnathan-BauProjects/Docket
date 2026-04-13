@@ -167,7 +167,7 @@ export default function Docket() {
   const [checkinProcessing, setCheckinProcessing] = useState(false);
   const [archiveFilter, setArchiveFilter] = useState("all");
   const [loading, setLoading] = useState(true);
-  const lastPromptRef = useRef(0);
+  const lastPromptRef = useRef(Date.now());
 
   // ── Load from Supabase ────────────────────────────────────────
   useEffect(() => {
