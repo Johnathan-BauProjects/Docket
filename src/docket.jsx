@@ -17,7 +17,25 @@ const sbSetSetting = async (key, value) => { try { await fetch(`${SB_URL}/rest/v
 
 // ── Claude ────────────────────────────────────────────────────────
 const ANTHROPIC_KEY = import.meta.env.VITE_ANTHROPIC_KEY || "";
-const askClaude = async prompt => { const res = await fetch("https://api.anthropic.com/v1/messages", { method: "POST", headers: { "Content-Type": "application/json", "x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" }, body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 1200, messages: [{ role: "user", content: prompt }] }) }); const d = await res.json(); return d.content?.map(b => b.text || "").join("") || ""; };
+const askClaude = async (prompt, retries = 3) => {
+  for (let i = 0; i < retries; i++) {
+    try {
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
+        body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 1200, messages: [{ role: "user", content: prompt }] })
+      });
+      if (res.status === 529 || res.status === 503 || res.status === 500) {
+        if (i < retries - 1) { await new Promise(r => setTimeout(r, (i + 1) * 3000)); continue; }
+      }
+      const d = await res.json();
+      return d.content?.map(b => b.text || "").join("") || "";
+    } catch {
+      if (i < retries - 1) await new Promise(r => setTimeout(r, (i + 1) * 3000));
+    }
+  }
+  return "";
+};
 
 // ── Helpers ───────────────────────────────────────────────────────
 const uid = () => Math.random().toString(36).slice(2, 10);
@@ -1375,9 +1393,8 @@ function TaskRow({ task, onToggle, onFU, onResolveFU, onFUNote, onDel, onUpdate 
 
   const requestRewrite = async () => {
     setRewriting(true); setRewriteOptions(null);
-    const res = await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json","x-api-key":ANTHROPIC_KEY,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:400,messages:[{role:"user",content:`Construction PM. Rewrite this task 3 ways using proper PM terminology. Return JSON array of 3 strings only. Under 12 words each. Task: "${task.text}"`}]})});
-    const d = await res.json();
-    try { setRewriteOptions(JSON.parse(d.content?.map(b=>b.text||"").join("")||"[]".replace(/```json|```/g,"").trim())); } catch { setRewriteOptions(["Could not generate. Try again."]); }
+    const raw = await askClaude(`Construction PM. Rewrite this task 3 ways using proper PM terminology. Return JSON array of 3 strings only. Under 12 words each. Task: "${task.text}"`);
+    try { setRewriteOptions(JSON.parse(raw.replace(/```json|```/g,"").trim())); } catch { setRewriteOptions(["Could not generate. Try again."]); }
     setRewriting(false);
   };
   const ds = deadlineStatus();
