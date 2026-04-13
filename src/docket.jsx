@@ -113,6 +113,21 @@ export default function Docket() {
   const [showMorningSummary, setShowMorningSummary] = useState(false);
   const [morningSummary, setMorningSummary] = useState("");
   const [loadingMorning, setLoadingMorning] = useState(false);
+  const [companyLogo, setCompanyLogo] = useState(null);
+  const [showSettings, setShowSettings] = useState(false);
+  // Time tracker
+  const [timeEntries, setTimeEntries] = useState([]);
+  const [clockedIn, setClockedIn] = useState(null); // { jobId, jobLabel, startTime }
+  const [timeTick, setTimeTick] = useState(0);
+  // Mileage
+  const [mileageEntries, setMileageEntries] = useState([]);
+  const [showMileage, setShowMileage] = useState(false);
+  const [mileageForm, setMileageForm] = useState({ from: "", to: "", jobId: "", date: new Date().toISOString().slice(0,10), notes: "" });
+  const [lookingUpKm, setLookingUpKm] = useState(false);
+  // Voice
+  const [isRecording, setIsRecording] = useState(false);
+  const [voiceTranscript, setVoiceTranscript] = useState("");
+  const recognitionRef = useRef(null);
   const lastPromptRef = useRef(Date.now());
 
   // ── Load ──────────────────────────────────────────────────────
@@ -134,6 +149,10 @@ export default function Docket() {
       const sc = await sbGetSetting("schedule"); if (sc) setSchedule(sc);
       const pc = await sbGetSetting("profCats"); if (pc) setProfCats(pc);
       const prc = await sbGetSetting("persCats"); if (prc) setPersCats(prc);
+      const logo = await sbGetSetting("companyLogo"); if (logo) setCompanyLogo(logo);
+      const te = await sbGetSetting("timeEntries"); if (te) setTimeEntries(te);
+      const me = await sbGetSetting("mileageEntries"); if (me) setMileageEntries(me);
+      const ci = await sbGetSetting("clockedIn"); if (ci) setClockedIn(ci);
       setLoading(false);
     })();
   }, []);
@@ -194,12 +213,46 @@ export default function Docket() {
     const overdue = open.filter(t => t.deadline && new Date(t.deadline + "T00:00:00") < new Date());
     const dueToday = open.filter(t => t.deadline && new Date(t.deadline + "T00:00:00").toDateString() === todayStr());
     const fu = tasks.filter(t => t.followUp && t.status !== "done");
-    const msg = await askClaude(`You are a construction PM assistant. Generate a brief morning briefing for today ${fmtDate(nowISO())}.
-OVERDUE TASKS: ${overdue.map(t=>`[${t.jobLabel}] ${t.text}`).join(", ")||"none"}
-DUE TODAY: ${dueToday.map(t=>`[${t.jobLabel}] ${t.text}`).join(", ")||"none"}
-OPEN FOLLOW-UPS: ${fu.map(t=>`[${t.jobLabel}] ${t.text}`).join(", ")||"none"}
-ALL OPEN: ${open.length} tasks across ${[...new Set(open.map(t=>t.jobLabel))].join(", ")||"no jobs"}
-Keep it under 5 bullet points. Start with the most urgent items. Professional and direct. Use markdown.`);
+    const highPriority = open.filter(t => t.priority === "high");
+    // High priority subtasks with due dates
+    const highPriSubs = [];
+    open.forEach(t => { (t.subtasks||[]).filter(s => !s.done && s.priority === "high" && s.deadline).forEach(s => highPriSubs.push({ task: t.text, sub: s.text, deadline: s.deadline, job: t.jobLabel })); });
+    // 7-day look ahead
+    const weekAhead = [];
+    for (let i = 1; i <= 7; i++) {
+      const d = new Date(); d.setDate(d.getDate() + i);
+      const dStr = d.toISOString().slice(0,10);
+      const due = open.filter(t => t.deadline === dStr);
+      const subsDue = [];
+      open.forEach(t => { (t.subtasks||[]).filter(s => !s.done && s.deadline === dStr).forEach(s => subsDue.push({ task: t.text, sub: s.text, job: t.jobLabel })); });
+      if (due.length || subsDue.length) weekAhead.push({ date: d.toLocaleDateString([],{weekday:"short",month:"short",day:"numeric"}), tasks: due, subs: subsDue });
+    }
+    const msg = await askClaude(`You are a construction PM assistant. Generate a morning briefing for ${fmtDate(nowISO())}.
+
+TODAY'S TASKS (due today):
+${dueToday.map(t=>`- [${t.priority}] [${t.jobLabel}] ${t.text}`).join("\n")||"None"}
+
+HIGH PRIORITY TASKS:
+${highPriority.map(t=>`- [${t.jobLabel}] ${t.text}${t.deadline?" due "+t.deadline:""}`).join("\n")||"None"}
+
+HIGH PRIORITY SUBTASKS DUE:
+${highPriSubs.map(s=>`- [${s.job}] ${s.task} → ${s.sub} (due ${s.deadline})`).join("\n")||"None"}
+
+OVERDUE:
+${overdue.map(t=>`- [${t.jobLabel}] ${t.text} (was due ${t.deadline})`).join("\n")||"None"}
+
+OPEN FOLLOW-UPS:
+${fu.map(t=>`- [${t.jobLabel}] ${t.text}`).join("\n")||"None"}
+
+ALL OPEN: ${open.length} tasks across ${[...new Set(open.map(t=>t.jobLabel))].join(", ")||"no active jobs"}
+
+Format with these sections:
+1. **Today's Priorities** — what needs to happen today, most urgent first (max 6 bullet points)
+2. **Follow-Ups Requiring Action** — only if there are any
+3. **7-Day Look Ahead** — list upcoming deadlines day by day for the next week:
+${weekAhead.map(d=>`${d.date}: ${d.tasks.map(t=>t.text).concat(d.subs.map(s=>s.sub)).join(", ")}`).join("\n")||"Nothing scheduled in the next 7 days"}
+
+Keep it tight and actionable. Professional tone. Markdown.`);
     setMorningSummary(msg); setLoadingMorning(false);
   };
 
@@ -300,6 +353,13 @@ Respond ONLY with JSON: {"matchIndex":<index or null>,"matchConfidence":"high"|"
   const removeCat = async (mode, cat) => { if (mode === "professional") { const u = profCats.filter(x => x !== cat); setProfCats(u); await sbSetSetting("profCats", u); } else { const u = persCats.filter(x => x !== cat); setPersCats(u); await sbSetSetting("persCats", u); } };
 
   // ── Report ────────────────────────────────────────────────────
+  const fetchWeather = async jobLabel => {
+    try {
+      const resp = await askClaude(`Give me the current weather conditions for a construction job site in or near "${jobLabel}" in Canada. Include temperature in Celsius, conditions (sunny/cloudy/rain/snow etc), and wind. Format as one short line like: "12°C, Partly Cloudy, Wind 15 km/h NW". If you cannot determine the location respond with just "Weather unavailable". No other text.`);
+      return resp.trim();
+    } catch { return "Weather unavailable"; }
+  };
+
   const generateReport = async () => {
     setView("report"); setLoadingReport(true);
     const selDate = new Date(reportDate + "T00:00:00").toDateString();
@@ -307,11 +367,18 @@ Respond ONLY with JSON: {"matchIndex":<index or null>,"matchConfidence":"high"|"
     const open = tasks.filter(t => t.status === "open" && t.mode === tab);
     const fu = tasks.filter(t => t.followUp && t.status !== "done" && t.mode === tab);
     const dayLogs = logs.filter(l => new Date(l.time).toDateString() === selDate && l.mode === tab);
-    const r = await askClaude(`Professional end-of-day PM report for ${fmtDate(reportDate + "T00:00:00")}. Mode: ${tab}.${reportNotes ? `\nNOTES: ${reportNotes}` : ""}
+    // Get weather for active job if professional
+    let weatherStr = "";
+    if (tab === "professional" && activeJob) {
+      const job = jobs.find(j => j.id === activeJob);
+      if (job) weatherStr = await fetchWeather(jLabel(job));
+    }
+    const r = await askClaude(`Professional end-of-day PM report for ${fmtDate(reportDate + "T00:00:00")}. Mode: ${tab}.${reportNotes ? `\nNOTES: ${reportNotes}` : ""}${weatherStr && weatherStr !== "Weather unavailable" ? `\nWEATHER: ${weatherStr}` : ""}
 COMPLETED:\n${done.map(t=>`- [${t.jobLabel||t.jobId}][${t.category}][${t.priority}] ${t.text}`).join("\n")||"None"}
 LOGS:\n${dayLogs.map(l=>`[${fmtTime(l.time)}][${l.jobLabel||l.jobId}]${l.type==="visitor"?" VISITOR:":""} ${l.text}`).join("\n")||"None"}
 OPEN:\n${open.map(t=>`- [${t.jobLabel||t.jobId}][${t.category}]${t.deadline?` [Due: ${t.deadline}]`:""} ${t.text}`).join("\n")||"None"}
 FOLLOW-UPS:\n${fu.map(t=>`- [${t.jobLabel||t.jobId}] ${t.text}${t.followUpNote?": "+t.followUpNote:""}`).join("\n")||"None"}
+${weatherStr && weatherStr !== "Weather unavailable" ? `\nInclude weather conditions at the top of the report under the date.` : ""}
 Sections: Completed Work (by job), In Progress (by job), Follow-Ups Required. No title. Professional. Markdown.`);
     setReport(r); setLoadingReport(false);
   };
@@ -328,6 +395,103 @@ Sections: Completed Work (by job), In Progress (by job), Follow-Ups Required. No
     navigator.clipboard.writeText(lines.filter(Boolean).join("\n"));
   };
   const downloadHTML = () => { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([exportContent],{type:"text/html"})); a.download = `Docket-${new Date().toISOString().slice(0,10)}.html`; a.click(); };
+
+  // ── Time tracker tick ─────────────────────────────────────────
+  useEffect(() => {
+    if (!clockedIn) return;
+    const id = setInterval(() => setTimeTick(t => t + 1), 1000);
+    return () => clearInterval(id);
+  }, [clockedIn]);
+
+  const clockIn = async () => {
+    const job = jobs.find(j => j.id === activeJob);
+    const entry = { jobId: activeJob, jobLabel: job ? jLabel(job) : "", startTime: nowISO() };
+    setClockedIn(entry);
+    await sbSetSetting("clockedIn", entry);
+  };
+
+  const clockOut = async () => {
+    if (!clockedIn) return;
+    const end = nowISO();
+    const dur = Math.round((new Date(end) - new Date(clockedIn.startTime)) / 60000);
+    const entry = { id: uid(), jobId: clockedIn.jobId, jobLabel: clockedIn.jobLabel, date: clockedIn.startTime.slice(0,10), start: clockedIn.startTime, end, durationMin: dur };
+    const updated = [...timeEntries, entry];
+    setTimeEntries(updated);
+    await sbSetSetting("timeEntries", updated);
+    setClockedIn(null);
+    await sbSetSetting("clockedIn", null);
+  };
+
+  const deleteTimeEntry = async id => {
+    const updated = timeEntries.filter(e => e.id !== id);
+    setTimeEntries(updated);
+    await sbSetSetting("timeEntries", updated);
+  };
+
+  const formatDuration = min => { const h = Math.floor(min / 60); const m = min % 60; return h > 0 ? `${h}h ${m}m` : `${m}m`; };
+
+  const elapsedMin = clockedIn ? Math.floor((Date.now() - new Date(clockedIn.startTime).getTime()) / 60000) : 0;
+
+  // ── Mileage ───────────────────────────────────────────────────
+  const lookupKm = async () => {
+    if (!mileageForm.from.trim() || !mileageForm.to.trim()) return;
+    setLookingUpKm(true);
+    const resp = await askClaude(`You are a driving distance assistant. The user is in Canada. Give the approximate one-way driving distance in kilometres between these two locations: FROM: "${mileageForm.from}" TO: "${mileageForm.to}". Respond with ONLY a JSON object like: {"km": 45, "note": "approximate via highway"}. No other text.`);
+    try {
+      const parsed = JSON.parse(resp.replace(/```json|```/g,"").trim());
+      setMileageForm(f => ({ ...f, km: parsed.km, note: parsed.note || "" }));
+    } catch { setMileageForm(f => ({ ...f, km: null })); }
+    setLookingUpKm(false);
+  };
+
+  const saveMileage = async () => {
+    if (!mileageForm.from || !mileageForm.to || !mileageForm.km) return;
+    const job = jobs.find(j => j.id === (mileageForm.jobId || activeJob));
+    const entry = { id: uid(), from: mileageForm.from, to: mileageForm.to, km: mileageForm.km, jobId: job?.id || activeJob, jobLabel: job ? jLabel(job) : "", date: mileageForm.date, notes: mileageForm.notes || "" };
+    const updated = [...mileageEntries, entry];
+    setMileageEntries(updated);
+    await sbSetSetting("mileageEntries", updated);
+    setMileageForm({ from: "", to: "", jobId: "", date: new Date().toISOString().slice(0,10), notes: "", km: null });
+  };
+
+  const deleteMileageEntry = async id => {
+    const updated = mileageEntries.filter(e => e.id !== id);
+    setMileageEntries(updated);
+    await sbSetSetting("mileageEntries", updated);
+  };
+
+  // ── Voice input ───────────────────────────────────────────────
+  const startVoice = () => {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) { alert("Voice input not supported in this browser. Try Chrome."); return; }
+    const r = new SR();
+    r.continuous = true; r.interimResults = true; r.lang = "en-CA";
+    r.onresult = e => { let t = ""; for (let i = 0; i < e.results.length; i++) t += e.results[i][0].transcript; setVoiceTranscript(t); };
+    r.onend = () => setIsRecording(false);
+    recognitionRef.current = r;
+    r.start(); setIsRecording(true);
+  };
+
+  const stopVoice = async () => {
+    if (recognitionRef.current) recognitionRef.current.stop();
+    setIsRecording(false);
+    if (!voiceTranscript.trim()) return;
+    // AI summarize the voice transcript into a clean log entry
+    const summary = await askClaude(`You are a construction PM assistant. The following is a voice note recorded on a job site. Summarize it into a clear, concise professional log entry (2-4 sentences max). Remove filler words and false starts. Preserve all important details like names, quantities, locations, and decisions made.\n\nVOICE NOTE: "${voiceTranscript}"\n\nRespond with ONLY the cleaned summary, no preamble.`);
+    setManualLogText(summary);
+    setVoiceTranscript("");
+    setShowManualLog(true);
+  };
+
+  // ── Logo ──────────────────────────────────────────────────────
+  const handleLogoUpload = async e => {
+    const file = e.target.files[0]; if (!file) return;
+    const reader = new FileReader();
+    reader.onload = async ev => { const b64 = ev.target.result; setCompanyLogo(b64); await sbSetSetting("companyLogo", b64); };
+    reader.readAsDataURL(file);
+  };
+
+  const removeLogo = async () => { setCompanyLogo(null); await sbSetSetting("companyLogo", null); };
 
   // ── Schedule ──────────────────────────────────────────────────
   const openSchedule = () => { setScheduleEdit({...schedule}); setShowSchedule(true); };
@@ -409,8 +573,12 @@ Sections: Completed Work (by job), In Progress (by job), Follow-Ups Required. No
                 <option value="checkin">Work Update</option>
               </select>
             </div>
-            <textarea style={S.textarea} rows={3} placeholder={manualLogType==="visitor"?"Who visited and why…":"What happened / what did you work on…"} value={manualLogText} onChange={e=>setManualLogText(e.target.value)} autoFocus/>
-            <div style={S.row}><button style={S.btnPrimary} onClick={submitManualLog}>Add to Log</button><button style={S.btnGhost} onClick={()=>{setShowManualLog(false);setManualLogText("");}}>Cancel</button></div>
+            <div style={{position:"relative"}}>
+              <textarea style={S.textarea} rows={3} placeholder={manualLogType==="visitor"?"Who visited and why…":"What happened / what did you work on…"} value={manualLogText} onChange={e=>setManualLogText(e.target.value)} autoFocus/>
+              <button style={{position:"absolute",top:8,right:8,background:isRecording?"#3a1a1a":"#222",border:"1px solid "+(isRecording?"#c55":"#333"),color:isRecording?"#c55":"#888",borderRadius:2,padding:"4px 8px",cursor:"pointer",fontFamily:"inherit",fontSize:11}} onClick={isRecording?stopVoice:startVoice}>{isRecording?"⏹ Stop":"🎤 Voice"}</button>
+            </div>
+            {voiceTranscript&&<div style={{fontSize:11,color:"#666",marginTop:4,fontStyle:"italic"}}>Transcript: {voiceTranscript.slice(0,80)}…</div>}
+            <div style={S.row}><button style={S.btnPrimary} onClick={submitManualLog}>Add to Log</button><button style={S.btnGhost} onClick={()=>{setShowManualLog(false);setManualLogText("");setVoiceTranscript("");}}>Cancel</button></div>
           </div>
         </div>
       )}
@@ -418,10 +586,35 @@ Sections: Completed Work (by job), In Progress (by job), Follow-Ups Required. No
       {/* ── Morning summary modal ── */}
       {showMorningSummary && (
         <div style={S.overlay}>
-          <div style={{...S.modal,maxWidth:520}}>
+          <div style={{...S.modal,maxWidth:560}}>
             <div style={S.modalTag}>MORNING BRIEFING — {fmtDate(nowISO()).toUpperCase()}</div>
             {loadingMorning?<div style={S.muted}>Generating briefing…</div>:<div className="report-body" dangerouslySetInnerHTML={{__html:mdToHtml(morningSummary)}}/>}
             <div style={{...S.row,marginTop:20}}><button style={S.btnGhost} onClick={()=>setShowMorningSummary(false)}>Close</button></div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Settings modal ── */}
+      {showSettings && (
+        <div style={S.overlay}>
+          <div style={{...S.modal,maxWidth:420}}>
+            <div style={S.modalTag}>SETTINGS</div>
+            <div style={S.schRow}>
+              <div style={S.schLabel}>Company Logo Watermark</div>
+              <p style={{fontSize:11,color:"#666",marginBottom:8,lineHeight:1.6}}>Upload a logo to display as a subtle watermark on the dashboard background.</p>
+              {companyLogo?(
+                <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:8}}>
+                  <img src={companyLogo} style={{height:40,opacity:0.7,borderRadius:2}} alt="logo"/>
+                  <button style={S.btnGhost} onClick={removeLogo}>Remove</button>
+                </div>
+              ):(
+                <label style={{...S.btnGhost,display:"inline-block",cursor:"pointer",marginBottom:8}}>
+                  Upload Logo (PNG/SVG)
+                  <input type="file" accept="image/*" style={{display:"none"}} onChange={handleLogoUpload}/>
+                </label>
+              )}
+            </div>
+            <div style={{...S.row,marginTop:8}}><button style={S.btnGhost} onClick={()=>setShowSettings(false)}>Close</button></div>
           </div>
         </div>
       )}
@@ -532,10 +725,13 @@ Sections: Completed Work (by job), In Progress (by job), Follow-Ups Required. No
         <div style={S.sideSection}>
           <button style={{...S.sideBtn,...(view==="followups"?S.sideBtnActive:{})}} onClick={()=>navTo("followups")}><span style={S.icon}>⚑</span> Follow-Ups{fuTasks.length>0&&<span style={{...S.pill,background:"#3a3a3a",color:"#ddd"}}>{fuTasks.length}</span>}</button>
           <button style={{...S.sideBtn,...(view==="report"?S.sideBtnActive:{})}} onClick={()=>{setView("report");generateReport();setSidebarOpen(false);}}><span style={S.icon}>≡</span> Daily Report</button>
+          <button style={{...S.sideBtn,...(view==="timesheet"?S.sideBtnActive:{})}} onClick={()=>navTo("timesheet")}><span style={S.icon}>◷</span> Timesheet</button>
+          <button style={{...S.sideBtn,...(view==="mileage"?S.sideBtnActive:{})}} onClick={()=>navTo("mileage")}><span style={S.icon}>⊙</span> Mileage Log</button>
           <button style={{...S.sideBtn,...(view==="archive"?S.sideBtnActive:{})}} onClick={()=>navTo("archive")}><span style={S.icon}>◫</span> Archive{archive.length>0&&<span style={S.pill}>{archive.length}</span>}</button>
           <button style={S.sideBtn} onClick={openExport}><span style={S.icon}>↗</span> Export / Share</button>
           <button style={S.sideBtn} onClick={()=>setShowManualLog(true)}><span style={S.icon}>✎</span> Add Log Entry</button>
           <button style={S.sideBtn} onClick={()=>{generateMorningSummary();setSidebarOpen(false);}}><span style={S.icon}>☀</span> Morning Briefing</button>
+          <button style={S.sideBtn} onClick={()=>setShowSettings(true)}><span style={S.icon}>⚙</span> Settings</button>
         </div>
 
         {tab==="professional"&&(<>
@@ -572,6 +768,8 @@ Sections: Completed Work (by job), In Progress (by job), Follow-Ups Required. No
             {view==="job"&&selectedJob&&(()=>{const j=jobById(selectedJob);return j?jLabel(j):selectedJob;})()}
             {view==="followups"&&"Follow-Ups"}
             {view==="report"&&"Daily Report"}
+            {view==="timesheet"&&"Timesheet"}
+            {view==="mileage"&&"Mileage Log"}
             {view==="archive"&&"Archive"}
           </div>
           <div style={S.topRight}>
@@ -638,7 +836,8 @@ Sections: Completed Work (by job), In Progress (by job), Follow-Ups Required. No
             const todayDone = tasks.filter(t=>t.completedAt&&new Date(t.completedAt).toDateString()===todayStr());
             const allFU = tasks.filter(t=>t.followUp&&t.status!=="done");
             return(
-              <div style={S.dashWrap}>
+              <div style={{...S.dashWrap,position:"relative",overflow:"hidden"}}>
+                {companyLogo&&<img src={companyLogo} style={{position:"absolute",top:"50%",left:"50%",transform:"translate(-50%,-50%)",maxWidth:"60%",maxHeight:"60%",opacity:0.04,pointerEvents:"none",userSelect:"none"}} alt=""/>}
                 <div style={S.dashGrid}>
                   <div style={{...S.dashCard,cursor:"pointer"}} onClick={()=>navTo("overview")}><div style={S.dashNum}>{profOpen.length}</div><div style={S.dashLabel}>Professional Open</div></div>
                   <div style={{...S.dashCard,cursor:"pointer"}} onClick={()=>navTo("overview")}><div style={S.dashNum}>{persOpen.length}</div><div style={S.dashLabel}>Personal Open</div></div>
@@ -768,6 +967,140 @@ Sections: Completed Work (by job), In Progress (by job), Follow-Ups Required. No
             </div>
           )}
 
+          {/* TIMESHEET */}
+          {view==="timesheet"&&(()=>{
+            const todayEntries = timeEntries.filter(e => e.date === new Date().toISOString().slice(0,10));
+            const weekEntries = timeEntries.filter(e => {
+              const d = new Date(e.date); const now = new Date();
+              const weekAgo = new Date(now); weekAgo.setDate(now.getDate() - 7);
+              return d >= weekAgo;
+            });
+            const totalMinToday = todayEntries.reduce((a,e)=>a+e.durationMin,0);
+            const byJob = {};
+            weekEntries.forEach(e => { if(!byJob[e.jobLabel])byJob[e.jobLabel]=0; byJob[e.jobLabel]+=e.durationMin; });
+            return(
+              <div style={S.reportWrap}>
+                {/* Clock in/out */}
+                <div style={{background:"#161616",border:"1px solid #1e1e1e",borderRadius:6,padding:"16px",marginBottom:20}}>
+                  <div style={{fontSize:9,color:"#555",letterSpacing:"0.12em",textTransform:"uppercase",marginBottom:10}}>Time Tracker</div>
+                  {clockedIn?(
+                    <div>
+                      <div style={{fontSize:13,color:"#c8a84b",marginBottom:4}}>
+                        ● Clocked in — {clockedIn.jobLabel} — {formatDuration(elapsedMin)} elapsed
+                      </div>
+                      <div style={{fontSize:10,color:"#555",marginBottom:12}}>Started {fmtTime(clockedIn.startTime)}</div>
+                      <button style={{...S.btnPrimary,background:"#2a1a1a",borderColor:"#4a2a2a",color:"#cc8888"}} onClick={clockOut}>⏹ Clock Out</button>
+                    </div>
+                  ):(
+                    <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+                      <select style={S.fSelect} value={activeJob||""} onChange={async e=>{setActiveJob(e.target.value);await sbSetSetting("activeJob",e.target.value);}}>
+                        {activeJobs.map(j=><option key={j.id} value={j.id}>{jLabel(j)}</option>)}
+                      </select>
+                      <button style={S.btnPrimary} onClick={clockIn}>▶ Clock In</button>
+                      {totalMinToday>0&&<span style={{fontSize:12,color:"#6a6"}}>Today: {formatDuration(totalMinToday)}</span>}
+                    </div>
+                  )}
+                </div>
+
+                {/* This week by job */}
+                {Object.keys(byJob).length>0&&(
+                  <div style={{marginBottom:20}}>
+                    <div style={S.dashSectionTitle}>This Week by Job</div>
+                    {Object.entries(byJob).map(([job,min])=>(
+                      <div key={job} style={{display:"flex",justifyContent:"space-between",padding:"6px 0",borderBottom:"1px solid #191919",fontSize:13}}>
+                        <span style={{color:"#bbb"}}>{job}</span>
+                        <span style={{color:"#888",fontFamily:"monospace"}}>{formatDuration(min)}</span>
+                      </div>
+                    ))}
+                    <div style={{display:"flex",justifyContent:"space-between",padding:"8px 0",fontSize:13,marginTop:2}}>
+                      <span style={{color:"#666",fontSize:11,letterSpacing:"0.06em",textTransform:"uppercase"}}>Total</span>
+                      <span style={{color:"#c8a84b",fontFamily:"monospace"}}>{formatDuration(Object.values(byJob).reduce((a,b)=>a+b,0))}</span>
+                    </div>
+                  </div>
+                )}
+
+                {/* Entry history */}
+                <div style={S.dashSectionTitle}>Recent Entries</div>
+                {timeEntries.length===0?<div style={S.empty}>No time entries yet.</div>:
+                  [...timeEntries].reverse().slice(0,30).map(e=>(
+                    <div key={e.id} style={{display:"flex",alignItems:"center",gap:10,padding:"7px 0",borderBottom:"1px solid #191919"}}>
+                      <div style={{flex:1}}>
+                        <div style={{fontSize:12,color:"#c0c0c0"}}>{e.jobLabel}</div>
+                        <div style={{fontSize:10,color:"#555"}}>{e.date} · {fmtTime(e.start)} – {fmtTime(e.end)}</div>
+                      </div>
+                      <span style={{fontFamily:"monospace",fontSize:12,color:"#888"}}>{formatDuration(e.durationMin)}</span>
+                      <button style={{...S.iconBtn,color:"#444"}} onClick={()=>deleteTimeEntry(e.id)}>✕</button>
+                    </div>
+                  ))
+                }
+              </div>
+            );
+          })()}
+
+          {/* MILEAGE */}
+          {view==="mileage"&&(()=>{
+            const totalKm = mileageEntries.reduce((a,e)=>a+(e.km||0),0);
+            const byJob = {};
+            mileageEntries.forEach(e=>{ if(!byJob[e.jobLabel])byJob[e.jobLabel]=0; byJob[e.jobLabel]+=(e.km||0); });
+            return(
+              <div style={S.reportWrap}>
+                {/* Add trip form */}
+                <div style={{background:"#161616",border:"1px solid #1e1e1e",borderRadius:6,padding:"16px",marginBottom:20}}>
+                  <div style={{fontSize:9,color:"#555",letterSpacing:"0.12em",textTransform:"uppercase",marginBottom:12}}>Log a Trip</div>
+                  <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:8}}>
+                    <input style={{...S.fInput,minWidth:140}} placeholder="From (city/address)…" value={mileageForm.from} onChange={e=>setMileageForm(f=>({...f,from:e.target.value}))}/>
+                    <input style={{...S.fInput,minWidth:140}} placeholder="To (city/address)…" value={mileageForm.to} onChange={e=>setMileageForm(f=>({...f,to:e.target.value}))}/>
+                    <button style={S.btnGhost} onClick={lookupKm} disabled={lookingUpKm}>{lookingUpKm?"Looking up…":"⊙ Lookup km"}</button>
+                  </div>
+                  <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:8}}>
+                    <select style={S.fSelect} value={mileageForm.jobId||activeJob||""} onChange={e=>setMileageForm(f=>({...f,jobId:e.target.value}))}>
+                      {activeJobs.map(j=><option key={j.id} value={j.id}>{jLabel(j)}</option>)}
+                    </select>
+                    <input type="date" style={S.fSelect} value={mileageForm.date} onChange={e=>setMileageForm(f=>({...f,date:e.target.value}))}/>
+                    <input style={{...S.fSelect,width:80}} type="number" placeholder="km" value={mileageForm.km||""} onChange={e=>setMileageForm(f=>({...f,km:+e.target.value}))}/>
+                  </div>
+                  <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                    <input style={{...S.fInput}} placeholder="Notes (optional)…" value={mileageForm.notes} onChange={e=>setMileageForm(f=>({...f,notes:e.target.value}))}/>
+                    <button style={S.btnPrimary} onClick={saveMileage} disabled={!mileageForm.km}>Save Trip</button>
+                  </div>
+                  {mileageForm.km&&<div style={{fontSize:11,color:"#6a6",marginTop:6}}>✓ {mileageForm.km} km{mileageForm.note?` — ${mileageForm.note}`:""}</div>}
+                </div>
+
+                {/* Totals by job */}
+                {Object.keys(byJob).length>0&&(
+                  <div style={{marginBottom:20}}>
+                    <div style={S.dashSectionTitle}>Total by Job</div>
+                    {Object.entries(byJob).map(([job,km])=>(
+                      <div key={job} style={{display:"flex",justifyContent:"space-between",padding:"6px 0",borderBottom:"1px solid #191919",fontSize:13}}>
+                        <span style={{color:"#bbb"}}>{job}</span>
+                        <span style={{color:"#888",fontFamily:"monospace"}}>{km} km</span>
+                      </div>
+                    ))}
+                    <div style={{display:"flex",justifyContent:"space-between",padding:"8px 0",fontSize:13}}>
+                      <span style={{color:"#666",fontSize:11,letterSpacing:"0.06em",textTransform:"uppercase"}}>Total</span>
+                      <span style={{color:"#c8a84b",fontFamily:"monospace"}}>{totalKm} km</span>
+                    </div>
+                  </div>
+                )}
+
+                {/* Trip history */}
+                <div style={S.dashSectionTitle}>Trip Log</div>
+                {mileageEntries.length===0?<div style={S.empty}>No trips logged yet.</div>:
+                  [...mileageEntries].reverse().map(e=>(
+                    <div key={e.id} style={{display:"flex",alignItems:"center",gap:10,padding:"7px 0",borderBottom:"1px solid #191919"}}>
+                      <div style={{flex:1}}>
+                        <div style={{fontSize:12,color:"#c0c0c0"}}>{e.from} → {e.to}</div>
+                        <div style={{fontSize:10,color:"#555"}}>{e.jobLabel} · {e.date}{e.notes?` · ${e.notes}`:""}</div>
+                      </div>
+                      <span style={{fontFamily:"monospace",fontSize:12,color:"#888"}}>{e.km} km</span>
+                      <button style={{...S.iconBtn,color:"#444"}} onClick={()=>deleteMileageEntry(e.id)}>✕</button>
+                    </div>
+                  ))
+                }
+              </div>
+            );
+          })()}
+
           {/* ARCHIVE */}
           {view==="archive"&&(()=>{
             const filtered=archive.filter(t=>archiveFilter==="all"||t.mode===archiveFilter);
@@ -859,6 +1192,8 @@ function TaskRow({ task, onToggle, onFU, onResolveFU, onFUNote, onDel, onUpdate 
   const [editText, setEditText] = useState(task.text);
   const [showSubs, setShowSubs] = useState(false);
   const [newSub, setNewSub] = useState("");
+  const [newSubDeadline, setNewSubDeadline] = useState("");
+  const [newSubPriority, setNewSubPriority] = useState("medium");
   const [addingSub, setAddingSub] = useState(false);
 
   const subtasks = task.subtasks || [];
@@ -866,7 +1201,11 @@ function TaskRow({ task, onToggle, onFU, onResolveFU, onFUNote, onDel, onUpdate 
   const subDone = subtasks.filter(s => s.done).length;
   const pct = subTotal > 0 ? Math.round((subDone / subTotal) * 100) : null;
 
-  const addSubtask = () => { if(!newSub.trim())return; const u=[...subtasks,{id:Math.random().toString(36).slice(2,8),text:newSub.trim(),done:false}]; onUpdate({subtasks:u}); setNewSub(""); setAddingSub(false); setShowSubs(true); };
+  const addSubtask = () => {
+    if(!newSub.trim()) return;
+    const u = [...subtasks, { id: Math.random().toString(36).slice(2,8), text: newSub.trim(), done: false, deadline: newSubDeadline||null, priority: newSubPriority }];
+    onUpdate({subtasks:u}); setNewSub(""); setNewSubDeadline(""); setNewSubPriority("medium"); setAddingSub(false); setShowSubs(true);
+  };
   const toggleSub = sid => { const u=subtasks.map(s=>s.id===sid?{...s,done:!s.done}:s); const allDone=u.every(s=>s.done); onUpdate({subtasks:u,...(u.length>0&&allDone&&task.status!=="done"?{status:"done",completedAt:new Date().toISOString()}:{})}); };
   const removeSub = sid => onUpdate({subtasks:subtasks.filter(s=>s.id!==sid)});
 
@@ -920,8 +1259,30 @@ function TaskRow({ task, onToggle, onFU, onResolveFU, onFUNote, onDel, onUpdate 
           </select>
           <span style={{...S.metaLink,marginLeft:2}} onClick={requestRewrite}>{rewriting?"…":"✦ rewrite"}</span>
         </div>
-        {showSubs&&subTotal>0&&(<div style={S.subList}>{subtasks.map(s=>(<div key={s.id} style={S.subRow}><button style={S.subCheck} onClick={()=>toggleSub(s.id)}>{s.done?"■":"□"}</button><span style={{...S.subText,textDecoration:s.done?"line-through":"none",color:s.done?"#555":"#aaa"}}>{s.text}</span><button style={S.subDel} onClick={()=>removeSub(s.id)}>✕</button></div>))}</div>)}
-        {addingSub&&(<div style={S.subAddRow}><input style={S.subInput} placeholder="Subtask…" value={newSub} autoFocus onChange={e=>setNewSub(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")addSubtask();if(e.key==="Escape"){setAddingSub(false);setNewSub("");}}}/><button style={S.subAddBtn} onClick={addSubtask}>Add</button><button style={S.subCancelBtn} onClick={()=>{setAddingSub(false);setNewSub("");}}>✕</button></div>)}
+        {showSubs&&subTotal>0&&(<div style={S.subList}>{subtasks.map(s=>{
+          const sPri = PRIORITIES[s.priority||"medium"];
+          const sDl = s.deadline ? (() => { const d=new Date(s.deadline+"T00:00:00"); const today=new Date(); today.setHours(0,0,0,0); const diff=Math.round((d-today)/86400000); if(diff<0)return{label:`${Math.abs(diff)}d overdue`,color:"#c55"}; if(diff===0)return{label:"today",color:"#c8a84b"}; return{label:fmtShort(s.deadline),color:"#555"}; })() : null;
+          return(<div key={s.id} style={S.subRow}>
+            <button style={S.subCheck} onClick={()=>toggleSub(s.id)}>{s.done?"■":"□"}</button>
+            <span style={{...S.priorityDot,background:sPri.color,width:5,height:5,marginRight:2}}/>
+            <span style={{...S.subText,textDecoration:s.done?"line-through":"none",color:s.done?"#555":"#aaa"}}>{s.text}</span>
+            {sDl&&<span style={{fontSize:9,color:sDl.color,marginLeft:4}}>{sDl.label}</span>}
+            <button style={S.subDel} onClick={()=>removeSub(s.id)}>✕</button>
+          </div>);
+        })}</div>)}
+        {addingSub&&(<div style={{...S.subAddRow,flexDirection:"column",alignItems:"stretch",gap:5}}>
+          <div style={{display:"flex",gap:5}}>
+            <input style={S.subInput} placeholder="Subtask description…" value={newSub} autoFocus onChange={e=>setNewSub(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")addSubtask();if(e.key==="Escape"){setAddingSub(false);setNewSub("");}}}/>
+            <button style={S.subAddBtn} onClick={addSubtask}>Add</button>
+            <button style={S.subCancelBtn} onClick={()=>{setAddingSub(false);setNewSub("");setNewSubDeadline("");setNewSubPriority("medium");}}>✕</button>
+          </div>
+          <div style={{display:"flex",gap:5,alignItems:"center"}}>
+            <select style={{...S.fSelect,fontSize:10,padding:"3px 6px"}} value={newSubPriority} onChange={e=>setNewSubPriority(e.target.value)}>
+              <option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option>
+            </select>
+            <input type="date" style={{...S.deadlineInput,fontSize:10}} value={newSubDeadline} onChange={e=>setNewSubDeadline(e.target.value)}/>
+          </div>
+        </div>)}
         {rewriteOptions&&(<div style={S.rewriteBox}><div style={S.rewriteLabel}>SELECT REWRITE</div>{rewriteOptions.map((opt,i)=><button key={i} style={S.rewriteOpt} onClick={()=>{onUpdate({text:opt});setRewriteOptions(null);}}>{opt}</button>)}<button style={{...S.metaLink,marginTop:4,display:"block"}} onClick={()=>setRewriteOptions(null)}>dismiss</button></div>)}
         {task.followUp&&(<div style={S.fuTag}>⚑ Follow-up<span style={S.noteToggle} onClick={()=>setShowNote(s=>!s)}>{showNote?"hide":"note"}</span><span style={{...S.noteToggle,color:"#6a6"}} onClick={onResolveFU}>resolve</span></div>)}
         {showNote&&<input style={S.noteInput} placeholder="Follow-up note…" value={note} onChange={e=>{setNote(e.target.value);onFUNote(e.target.value);}}/>}
@@ -984,12 +1345,12 @@ const S = {
   content:{flex:1,overflowY:"auto",paddingBottom:40},
   dashWrap:{padding:"20px 24px"},
   dashGrid:{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,marginBottom:20},
-  dashCard:{background:"#131620",border:"1px solid #1e1e1e",borderRadius:6,padding:"14px",textAlign:"center"},
+  dashCard:{background:"#161616",border:"1px solid #1e1e1e",borderRadius:6,padding:"14px",textAlign:"center"},
   dashNum:{fontFamily:"'Tenor Sans',serif",fontSize:26,color:"#c8c8c8",lineHeight:1},
   dashLabel:{fontSize:10,color:"#555",letterSpacing:"0.08em",textTransform:"uppercase",marginTop:4},
   dashSection:{marginBottom:20},
   dashSectionTitle:{fontSize:9,letterSpacing:"0.14em",color:"#444",textTransform:"uppercase",marginBottom:10,paddingBottom:4,borderBottom:"1px solid #1e1e1e"},
-  dashJobRow:{display:"flex",alignItems:"center",padding:"8px 10px",background:"#131620",border:"1px solid #1e1e1e",borderRadius:4,marginBottom:6,cursor:"pointer"},
+  dashJobRow:{display:"flex",alignItems:"center",padding:"8px 10px",background:"#161616",border:"1px solid #1e1e1e",borderRadius:4,marginBottom:6,cursor:"pointer"},
   dashJobTitle:{fontSize:13,color:"#c0c0c0"},
   dashJobStats:{display:"flex",gap:10,flexWrap:"wrap"},
   dashStat:{fontSize:10,color:"#666"},
