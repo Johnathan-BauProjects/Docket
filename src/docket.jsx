@@ -16,25 +16,18 @@ const sbGetSetting = async key => { try { const r = await fetch(`${SB_URL}/rest/
 const sbSetSetting = async (key, value) => { try { await fetch(`${SB_URL}/rest/v1/settings`, { method: "POST", headers: { ...sbH, "Prefer": "resolution=merge-duplicates,return=minimal" }, body: JSON.stringify({ key, value }) }); } catch {} };
 
 // ── Claude ────────────────────────────────────────────────────────
-const ANTHROPIC_KEY = import.meta.env.VITE_ANTHROPIC_KEY || "";
-const askClaude = async (prompt, retries = 3) => {
-  for (let i = 0; i < retries; i++) {
-    try {
-      const res = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
-        body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 1200, messages: [{ role: "user", content: prompt }] })
-      });
-      if (res.status === 529 || res.status === 503 || res.status === 500) {
-        if (i < retries - 1) { await new Promise(r => setTimeout(r, (i + 1) * 3000)); continue; }
-      }
-      const d = await res.json();
-      return d.content?.map(b => b.text || "").join("") || "";
-    } catch {
-      if (i < retries - 1) await new Promise(r => setTimeout(r, (i + 1) * 3000));
-    }
+const askClaude = async (prompt, max_tokens = 1200) => {
+  try {
+    const res = await fetch("/api/claude", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt, max_tokens }),
+    });
+    const d = await res.json();
+    return d.text || "";
+  } catch {
+    return "";
   }
-  return "";
 };
 
 // ── Helpers ───────────────────────────────────────────────────────
