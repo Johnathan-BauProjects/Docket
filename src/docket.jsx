@@ -16,7 +16,8 @@ const sbGetSetting = async key => { try { const r = await fetch(`${SB_URL}/rest/
 const sbSetSetting = async (key, value) => { try { await fetch(`${SB_URL}/rest/v1/settings`, { method: "POST", headers: { ...sbH, "Prefer": "resolution=merge-duplicates,return=minimal" }, body: JSON.stringify({ key, value }) }); } catch {} };
 
 // ── Claude ────────────────────────────────────────────────────────
-const askClaude = async prompt => { const res = await fetch("https://api.anthropic.com/v1/messages", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 1200, messages: [{ role: "user", content: prompt }] }) }); const d = await res.json(); return d.content?.map(b => b.text || "").join("") || ""; };
+const ANTHROPIC_KEY = import.meta.env.VITE_ANTHROPIC_KEY || "";
+const askClaude = async prompt => { const res = await fetch("https://api.anthropic.com/v1/messages", { method: "POST", headers: { "Content-Type": "application/json", "x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" }, body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 1200, messages: [{ role: "user", content: prompt }] }) }); const d = await res.json(); return d.content?.map(b => b.text || "").join("") || ""; };
 
 // ── Helpers ───────────────────────────────────────────────────────
 const uid = () => Math.random().toString(36).slice(2, 10);
@@ -115,10 +116,11 @@ export default function Docket() {
   const [loadingMorning, setLoadingMorning] = useState(false);
   const [companyLogo, setCompanyLogo] = useState(null);
   const [showSettings, setShowSettings] = useState(false);
-  // Time tracker
+  // Timesheet
   const [timeEntries, setTimeEntries] = useState([]);
-  const [clockedIn, setClockedIn] = useState(null); // { jobId, jobLabel, startTime }
-  const [timeTick, setTimeTick] = useState(0);
+  const [editingTimeEntry, setEditingTimeEntry] = useState(null);
+  const [generatingTimesheet, setGeneratingTimesheet] = useState(false);
+  const [timesheetDate, setTimesheetDate] = useState(new Date().toISOString().slice(0,10));
   // Mileage
   const [mileageEntries, setMileageEntries] = useState([]);
   const [savedLocations, setSavedLocations] = useState([]);
@@ -157,7 +159,6 @@ export default function Docket() {
       const te = await sbGetSetting("timeEntries"); if (te) setTimeEntries(te);
       const me = await sbGetSetting("mileageEntries"); if (me) setMileageEntries(me);
       const sl = await sbGetSetting("savedLocations"); if (sl) setSavedLocations(sl);
-      const ci = await sbGetSetting("clockedIn"); if (ci) setClockedIn(ci);
       setLoading(false);
     })();
   }, []);
@@ -401,30 +402,39 @@ Sections: Completed Work (by job), In Progress (by job), Follow-Ups Required. No
   };
   const downloadHTML = () => { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([exportContent],{type:"text/html"})); a.download = `Docket-${new Date().toISOString().slice(0,10)}.html`; a.click(); };
 
-  // ── Time tracker tick ─────────────────────────────────────────
-  useEffect(() => {
-    if (!clockedIn) return;
-    const id = setInterval(() => setTimeTick(t => t + 1), 1000);
-    return () => clearInterval(id);
-  }, [clockedIn]);
+  // ── Timesheet (derived from daily log) ───────────────────────
+  const formatDuration = min => { const h = Math.floor(min / 60); const m = min % 60; return h > 0 ? `${h}h ${m}m` : `${m}m`; };
 
-  const clockIn = async () => {
-    const job = jobs.find(j => j.id === activeJob);
-    const entry = { jobId: activeJob, jobLabel: job ? jLabel(job) : "", startTime: nowISO() };
-    setClockedIn(entry);
-    await sbSetSetting("clockedIn", entry);
+  const generateTimesheet = async (date) => {
+    setGeneratingTimesheet(true);
+    const dayLogs = logs.filter(l => new Date(l.time).toDateString() === new Date(date + "T00:00:00").toDateString())
+      .sort((a,b) => new Date(a.time) - new Date(b.time));
+    if (!dayLogs.length) { setGeneratingTimesheet(false); return; }
+    // Use AI to interpret the log and assign time blocks per job
+    const resp = await askClaude(`You are a construction PM timesheet assistant. Based on these daily log entries, calculate how much time was spent on each job. Assume the work day runs from the first log entry to the last. Split time proportionally between jobs based on when entries were logged.
+
+LOG ENTRIES:
+${dayLogs.map(l => `[${fmtTime(l.time)}] [${l.jobLabel||"Unknown"}] ${l.text}`).join("\n")}
+
+Return ONLY a JSON array of time blocks, no markdown:
+[{"jobLabel":"Job Name","start":"09:00","end":"11:30","durationMin":150,"description":"Brief summary of work done"},...]
+Cover the full day from first to last entry. If only one job, one block is fine.`);
+    try {
+      const blocks = JSON.parse(resp.replace(/```json|```/g,"").trim());
+      const entries = blocks.map(b => ({ id: uid(), date, jobLabel: b.jobLabel, start: b.start, end: b.end, durationMin: b.durationMin, description: b.description }));
+      const existing = timeEntries.filter(e => e.date !== date);
+      const updated = [...existing, ...entries];
+      setTimeEntries(updated);
+      await sbSetSetting("timeEntries", updated);
+    } catch {}
+    setGeneratingTimesheet(false);
   };
 
-  const clockOut = async () => {
-    if (!clockedIn) return;
-    const end = nowISO();
-    const dur = Math.round((new Date(end) - new Date(clockedIn.startTime)) / 60000);
-    const entry = { id: uid(), jobId: clockedIn.jobId, jobLabel: clockedIn.jobLabel, date: clockedIn.startTime.slice(0,10), start: clockedIn.startTime, end, durationMin: dur };
-    const updated = [...timeEntries, entry];
+  const saveTimeEntry = async (entry) => {
+    const updated = timeEntries.map(e => e.id === entry.id ? entry : e);
     setTimeEntries(updated);
     await sbSetSetting("timeEntries", updated);
-    setClockedIn(null);
-    await sbSetSetting("clockedIn", null);
+    setEditingTimeEntry(null);
   };
 
   const deleteTimeEntry = async id => {
@@ -433,9 +443,13 @@ Sections: Completed Work (by job), In Progress (by job), Follow-Ups Required. No
     await sbSetSetting("timeEntries", updated);
   };
 
-  const formatDuration = min => { const h = Math.floor(min / 60); const m = min % 60; return h > 0 ? `${h}h ${m}m` : `${m}m`; };
-
-  const elapsedMin = clockedIn ? Math.floor((Date.now() - new Date(clockedIn.startTime).getTime()) / 60000) : 0;
+  const addManualTimeEntry = async (date) => {
+    const entry = { id: uid(), date, jobLabel: activeJobs[0]?.title || "", start: "09:00", end: "10:00", durationMin: 60, description: "" };
+    const updated = [...timeEntries, entry];
+    setTimeEntries(updated);
+    await sbSetSetting("timeEntries", updated);
+    setEditingTimeEntry(entry);
+  };
 
   // ── Mileage ───────────────────────────────────────────────────
   const saveLocation = async () => {
@@ -1038,70 +1052,74 @@ Sections: Completed Work (by job), In Progress (by job), Follow-Ups Required. No
 
           {/* TIMESHEET */}
           {view==="timesheet"&&(()=>{
-            const todayEntries = timeEntries.filter(e => e.date === new Date().toISOString().slice(0,10));
-            const weekEntries = timeEntries.filter(e => {
-              const d = new Date(e.date); const now = new Date();
-              const weekAgo = new Date(now); weekAgo.setDate(now.getDate() - 7);
-              return d >= weekAgo;
-            });
-            const totalMinToday = todayEntries.reduce((a,e)=>a+e.durationMin,0);
+            const dateEntries = timeEntries.filter(e => e.date === timesheetDate).sort((a,b)=>a.start.localeCompare(b.start));
+            const totalMin = dateEntries.reduce((a,e)=>a+e.durationMin,0);
             const byJob = {};
-            weekEntries.forEach(e => { if(!byJob[e.jobLabel])byJob[e.jobLabel]=0; byJob[e.jobLabel]+=e.durationMin; });
+            dateEntries.forEach(e=>{ if(!byJob[e.jobLabel])byJob[e.jobLabel]=0; byJob[e.jobLabel]+=e.durationMin; });
+            const dayLogs = logs.filter(l => new Date(l.time).toDateString() === new Date(timesheetDate+"T00:00:00").toDateString());
             return(
               <div style={S.reportWrap}>
-                {/* Clock in/out */}
-                <div style={{background:"#161616",border:"1px solid #1e1e1e",borderRadius:6,padding:"16px",marginBottom:20}}>
-                  <div style={{fontSize:9,color:"#555",letterSpacing:"0.12em",textTransform:"uppercase",marginBottom:10}}>Time Tracker</div>
-                  {clockedIn?(
-                    <div>
-                      <div style={{fontSize:13,color:"#c8a84b",marginBottom:4}}>
-                        ● Clocked in — {clockedIn.jobLabel} — {formatDuration(elapsedMin)} elapsed
-                      </div>
-                      <div style={{fontSize:10,color:"#555",marginBottom:12}}>Started {fmtTime(clockedIn.startTime)}</div>
-                      <button style={{...S.btnPrimary,background:"#2a1a1a",borderColor:"#4a2a2a",color:"#cc8888"}} onClick={clockOut}>⏹ Clock Out</button>
-                    </div>
-                  ):(
-                    <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
-                      <select style={S.fSelect} value={activeJob||""} onChange={async e=>{setActiveJob(e.target.value);await sbSetSetting("activeJob",e.target.value);}}>
-                        {activeJobs.map(j=><option key={j.id} value={j.id}>{jLabel(j)}</option>)}
-                      </select>
-                      <button style={S.btnPrimary} onClick={clockIn}>▶ Clock In</button>
-                      {totalMinToday>0&&<span style={{fontSize:12,color:"#6a6"}}>Today: {formatDuration(totalMinToday)}</span>}
-                    </div>
-                  )}
+                {/* Date selector + generate */}
+                <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:16,flexWrap:"wrap"}}>
+                  <input type="date" style={S.fSelect} value={timesheetDate} onChange={e=>setTimesheetDate(e.target.value)}/>
+                  <button style={S.btnPrimary} onClick={()=>generateTimesheet(timesheetDate)} disabled={generatingTimesheet||!dayLogs.length}>
+                    {generatingTimesheet?"Generating…":"◷ Generate from Log"}
+                  </button>
+                  <button style={S.btnGhost} onClick={()=>addManualTimeEntry(timesheetDate)}>+ Add Entry</button>
+                  {!dayLogs.length&&<span style={{fontSize:11,color:"#555"}}>No log entries for this date</span>}
                 </div>
 
-                {/* This week by job */}
-                {Object.keys(byJob).length>0&&(
-                  <div style={{marginBottom:20}}>
-                    <div style={S.dashSectionTitle}>This Week by Job</div>
-                    {Object.entries(byJob).map(([job,min])=>(
-                      <div key={job} style={{display:"flex",justifyContent:"space-between",padding:"6px 0",borderBottom:"1px solid #191919",fontSize:13}}>
-                        <span style={{color:"#bbb"}}>{job}</span>
-                        <span style={{color:"#888",fontFamily:"monospace"}}>{formatDuration(min)}</span>
-                      </div>
-                    ))}
-                    <div style={{display:"flex",justifyContent:"space-between",padding:"8px 0",fontSize:13,marginTop:2}}>
-                      <span style={{color:"#666",fontSize:11,letterSpacing:"0.06em",textTransform:"uppercase"}}>Total</span>
-                      <span style={{color:"#c8a84b",fontFamily:"monospace"}}>{formatDuration(Object.values(byJob).reduce((a,b)=>a+b,0))}</span>
+                {/* Edit modal */}
+                {editingTimeEntry&&(
+                  <div style={{background:"#161616",border:"1px solid #2a2a2a",borderRadius:4,padding:"14px",marginBottom:14}}>
+                    <div style={{fontSize:9,color:"#555",letterSpacing:"0.1em",textTransform:"uppercase",marginBottom:10}}>EDIT ENTRY</div>
+                    <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:8}}>
+                      <input style={{...S.fInput,minWidth:140}} placeholder="Job…" value={editingTimeEntry.jobLabel} onChange={e=>setEditingTimeEntry(t=>({...t,jobLabel:e.target.value}))}/>
+                      <input style={{...S.fSelect,width:80}} type="time" value={editingTimeEntry.start} onChange={e=>{ const s=e.target.value; const [sh,sm]=s.split(":").map(Number); const [eh,em]=editingTimeEntry.end.split(":").map(Number); const dur=(eh*60+em)-(sh*60+sm); setEditingTimeEntry(t=>({...t,start:s,durationMin:Math.max(0,dur)})); }}/>
+                      <input style={{...S.fSelect,width:80}} type="time" value={editingTimeEntry.end} onChange={e=>{ const en=e.target.value; const [sh,sm]=editingTimeEntry.start.split(":").map(Number); const [eh,em]=en.split(":").map(Number); const dur=(eh*60+em)-(sh*60+sm); setEditingTimeEntry(t=>({...t,end:en,durationMin:Math.max(0,dur)})); }}/>
                     </div>
+                    <input style={{...S.fInput,width:"100%",marginBottom:8}} placeholder="Description…" value={editingTimeEntry.description} onChange={e=>setEditingTimeEntry(t=>({...t,description:e.target.value}))}/>
+                    <div style={{display:"flex",gap:6}}><button style={S.btnPrimary} onClick={()=>saveTimeEntry(editingTimeEntry)}>Save</button><button style={S.btnGhost} onClick={()=>setEditingTimeEntry(null)}>Cancel</button></div>
                   </div>
                 )}
 
-                {/* Entry history */}
-                <div style={S.dashSectionTitle}>Recent Entries</div>
-                {timeEntries.length===0?<div style={S.empty}>No time entries yet.</div>:
-                  [...timeEntries].reverse().slice(0,30).map(e=>(
-                    <div key={e.id} style={{display:"flex",alignItems:"center",gap:10,padding:"7px 0",borderBottom:"1px solid #191919"}}>
-                      <div style={{flex:1}}>
-                        <div style={{fontSize:12,color:"#c0c0c0"}}>{e.jobLabel}</div>
-                        <div style={{fontSize:10,color:"#555"}}>{e.date} · {fmtTime(e.start)} – {fmtTime(e.end)}</div>
+                {/* Day breakdown */}
+                {dateEntries.length===0?(
+                  <div style={S.empty}>No timesheet for this date yet.{dayLogs.length>0?<><br/><br/><button style={S.btnGhost} onClick={()=>generateTimesheet(timesheetDate)}>Generate from {dayLogs.length} log entries</button></>:" Add entries or log activity first."}</div>
+                ):(
+                  <>
+                    <div style={S.dashSectionTitle}>Time Blocks — {new Date(timesheetDate+"T00:00:00").toLocaleDateString([],{weekday:"long",month:"short",day:"numeric"})}</div>
+                    {dateEntries.map(e=>(
+                      <div key={e.id} style={{display:"flex",alignItems:"flex-start",gap:10,padding:"8px 0",borderBottom:"1px solid #191919"}}>
+                        <div style={{flex:1}}>
+                          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:2}}>
+                            <span style={{fontSize:12,color:"#c0c0c0",fontWeight:600}}>{e.jobLabel}</span>
+                            <span style={{fontSize:10,color:"#555",fontFamily:"monospace"}}>{e.start} – {e.end}</span>
+                            <span style={{fontSize:10,color:"#c8a84b",fontFamily:"monospace"}}>{formatDuration(e.durationMin)}</span>
+                          </div>
+                          {e.description&&<div style={{fontSize:11,color:"#888"}}>{e.description}</div>}
+                        </div>
+                        <button style={{...S.iconBtn,color:"#555"}} onClick={()=>setEditingTimeEntry({...e})}>✎</button>
+                        <button style={{...S.iconBtn,color:"#3a3a3a"}} onClick={()=>deleteTimeEntry(e.id)}>✕</button>
                       </div>
-                      <span style={{fontFamily:"monospace",fontSize:12,color:"#888"}}>{formatDuration(e.durationMin)}</span>
-                      <button style={{...S.iconBtn,color:"#444"}} onClick={()=>deleteTimeEntry(e.id)}>✕</button>
+                    ))}
+
+                    {/* Totals */}
+                    <div style={{marginTop:12,paddingTop:12,borderTop:"1px solid #2a2a2a"}}>
+                      <div style={S.dashSectionTitle}>Breakdown by Job</div>
+                      {Object.entries(byJob).map(([job,min])=>(
+                        <div key={job} style={{display:"flex",justifyContent:"space-between",padding:"5px 0",fontSize:12}}>
+                          <span style={{color:"#bbb"}}>{job}</span>
+                          <span style={{color:"#888",fontFamily:"monospace"}}>{formatDuration(min)}</span>
+                        </div>
+                      ))}
+                      <div style={{display:"flex",justifyContent:"space-between",padding:"8px 0",marginTop:4,borderTop:"1px solid #1e1e1e"}}>
+                        <span style={{fontSize:11,color:"#666",letterSpacing:"0.06em",textTransform:"uppercase"}}>Total</span>
+                        <span style={{color:"#c8a84b",fontFamily:"monospace",fontSize:14}}>{formatDuration(totalMin)}</span>
+                      </div>
                     </div>
-                  ))
-                }
+                  </>
+                )}
               </div>
             );
           })()}
@@ -1357,7 +1375,7 @@ function TaskRow({ task, onToggle, onFU, onResolveFU, onFUNote, onDel, onUpdate 
 
   const requestRewrite = async () => {
     setRewriting(true); setRewriteOptions(null);
-    const res = await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:400,messages:[{role:"user",content:`Construction PM. Rewrite this task 3 ways using proper PM terminology. Return JSON array of 3 strings only. Under 12 words each. Task: "${task.text}"`}]})});
+    const res = await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json","x-api-key":ANTHROPIC_KEY,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:400,messages:[{role:"user",content:`Construction PM. Rewrite this task 3 ways using proper PM terminology. Return JSON array of 3 strings only. Under 12 words each. Task: "${task.text}"`}]})});
     const d = await res.json();
     try { setRewriteOptions(JSON.parse(d.content?.map(b=>b.text||"").join("")||"[]".replace(/```json|```/g,"").trim())); } catch { setRewriteOptions(["Could not generate. Try again."]); }
     setRewriting(false);
