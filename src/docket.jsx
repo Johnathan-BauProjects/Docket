@@ -121,9 +121,13 @@ export default function Docket() {
   const [timeTick, setTimeTick] = useState(0);
   // Mileage
   const [mileageEntries, setMileageEntries] = useState([]);
+  const [savedLocations, setSavedLocations] = useState([]);
   const [showMileage, setShowMileage] = useState(false);
-  const [mileageForm, setMileageForm] = useState({ from: "", to: "", jobId: "", date: new Date().toISOString().slice(0,10), notes: "" });
+  const [mileageForm, setMileageForm] = useState({ fromId: "", toId: "", jobId: "", date: new Date().toISOString().slice(0,10), notes: "", km: null });
   const [lookingUpKm, setLookingUpKm] = useState(false);
+  const [addingLocation, setAddingLocation] = useState(null); // "from" | "to" | null
+  const [newLocName, setNewLocName] = useState("");
+  const [newLocAddress, setNewLocAddress] = useState("");
   // Voice
   const [isRecording, setIsRecording] = useState(false);
   const [voiceTranscript, setVoiceTranscript] = useState("");
@@ -152,6 +156,7 @@ export default function Docket() {
       const logo = await sbGetSetting("companyLogo"); if (logo) setCompanyLogo(logo);
       const te = await sbGetSetting("timeEntries"); if (te) setTimeEntries(te);
       const me = await sbGetSetting("mileageEntries"); if (me) setMileageEntries(me);
+      const sl = await sbGetSetting("savedLocations"); if (sl) setSavedLocations(sl);
       const ci = await sbGetSetting("clockedIn"); if (ci) setClockedIn(ci);
       setLoading(false);
     })();
@@ -433,25 +438,47 @@ Sections: Completed Work (by job), In Progress (by job), Follow-Ups Required. No
   const elapsedMin = clockedIn ? Math.floor((Date.now() - new Date(clockedIn.startTime).getTime()) / 60000) : 0;
 
   // ── Mileage ───────────────────────────────────────────────────
+  const saveLocation = async () => {
+    if (!newLocName.trim() || !newLocAddress.trim()) return;
+    const loc = { id: uid(), name: newLocName.trim(), address: newLocAddress.trim() };
+    const updated = [...savedLocations, loc];
+    setSavedLocations(updated);
+    await sbSetSetting("savedLocations", updated);
+    // Auto-select into the field we were adding for
+    if (addingLocation === "from") setMileageForm(f => ({ ...f, fromId: loc.id, km: null }));
+    if (addingLocation === "to") setMileageForm(f => ({ ...f, toId: loc.id, km: null }));
+    setNewLocName(""); setNewLocAddress(""); setAddingLocation(null);
+  };
+
+  const deleteLocation = async id => {
+    const updated = savedLocations.filter(l => l.id !== id);
+    setSavedLocations(updated);
+    await sbSetSetting("savedLocations", updated);
+  };
+
   const lookupKm = async () => {
-    if (!mileageForm.from.trim() || !mileageForm.to.trim()) return;
+    const from = savedLocations.find(l => l.id === mileageForm.fromId);
+    const to = savedLocations.find(l => l.id === mileageForm.toId);
+    if (!from || !to) return;
     setLookingUpKm(true);
-    const resp = await askClaude(`You are a driving distance assistant. The user is in Canada. Give the approximate one-way driving distance in kilometres between these two locations: FROM: "${mileageForm.from}" TO: "${mileageForm.to}". Respond with ONLY a JSON object like: {"km": 45, "note": "approximate via highway"}. No other text.`);
+    const resp = await askClaude(`You are a driving distance calculator. Give the one-way driving distance in kilometres between these two addresses in Canada:\nFROM: "${from.address}"\nTO: "${to.address}"\nRespond with ONLY a JSON object, no other text: {"km": 45}`);
     try {
       const parsed = JSON.parse(resp.replace(/```json|```/g,"").trim());
-      setMileageForm(f => ({ ...f, km: parsed.km, note: parsed.note || "" }));
+      setMileageForm(f => ({ ...f, km: parsed.km }));
     } catch { setMileageForm(f => ({ ...f, km: null })); }
     setLookingUpKm(false);
   };
 
   const saveMileage = async () => {
-    if (!mileageForm.from || !mileageForm.to || !mileageForm.km) return;
+    const from = savedLocations.find(l => l.id === mileageForm.fromId);
+    const to = savedLocations.find(l => l.id === mileageForm.toId);
+    if (!from || !to || !mileageForm.km) return;
     const job = jobs.find(j => j.id === (mileageForm.jobId || activeJob));
-    const entry = { id: uid(), from: mileageForm.from, to: mileageForm.to, km: mileageForm.km, jobId: job?.id || activeJob, jobLabel: job ? jLabel(job) : "", date: mileageForm.date, notes: mileageForm.notes || "" };
+    const entry = { id: uid(), from: from.name, fromAddress: from.address, to: to.name, toAddress: to.address, km: mileageForm.km, jobId: job?.id || activeJob, jobLabel: job ? jLabel(job) : "", date: mileageForm.date, notes: mileageForm.notes || "" };
     const updated = [...mileageEntries, entry];
     setMileageEntries(updated);
     await sbSetSetting("mileageEntries", updated);
-    setMileageForm({ from: "", to: "", jobId: "", date: new Date().toISOString().slice(0,10), notes: "", km: null });
+    setMileageForm({ fromId: "", toId: "", jobId: "", date: new Date().toISOString().slice(0,10), notes: "", km: null });
   };
 
   const deleteMileageEntry = async id => {
@@ -724,6 +751,7 @@ Sections: Completed Work (by job), In Progress (by job), Follow-Ups Required. No
 
         <div style={S.sideSection}>
           <button style={{...S.sideBtn,...(view==="followups"?S.sideBtnActive:{})}} onClick={()=>navTo("followups")}><span style={S.icon}>⚑</span> Follow-Ups{fuTasks.length>0&&<span style={{...S.pill,background:"#3a3a3a",color:"#ddd"}}>{fuTasks.length}</span>}</button>
+          <button style={{...S.sideBtn,...(view==="dailylog"?S.sideBtnActive:{})}} onClick={()=>navTo("dailylog")}><span style={S.icon}>◈</span> Daily Log{logs.filter(l=>new Date(l.time).toDateString()===todayStr()).length>0&&<span style={S.pill}>{logs.filter(l=>new Date(l.time).toDateString()===todayStr()).length}</span>}</button>
           <button style={{...S.sideBtn,...(view==="report"?S.sideBtnActive:{})}} onClick={()=>{setView("report");generateReport();setSidebarOpen(false);}}><span style={S.icon}>≡</span> Daily Report</button>
           <button style={{...S.sideBtn,...(view==="timesheet"?S.sideBtnActive:{})}} onClick={()=>navTo("timesheet")}><span style={S.icon}>◷</span> Timesheet</button>
           <button style={{...S.sideBtn,...(view==="mileage"?S.sideBtnActive:{})}} onClick={()=>navTo("mileage")}><span style={S.icon}>⊙</span> Mileage Log</button>
@@ -767,6 +795,7 @@ Sections: Completed Work (by job), In Progress (by job), Follow-Ups Required. No
             {view==="overview"&&(tab==="professional"?"All Professional Tasks":"All Personal Tasks")}
             {view==="job"&&selectedJob&&(()=>{const j=jobById(selectedJob);return j?jLabel(j):selectedJob;})()}
             {view==="followups"&&"Follow-Ups"}
+            {view==="dailylog"&&"Daily Log"}
             {view==="report"&&"Daily Report"}
             {view==="timesheet"&&"Timesheet"}
             {view==="mileage"&&"Mileage Log"}
@@ -967,6 +996,46 @@ Sections: Completed Work (by job), In Progress (by job), Follow-Ups Required. No
             </div>
           )}
 
+          {/* DAILY LOG */}
+          {view==="dailylog"&&(()=>{
+            const todayLogs = logs.filter(l => new Date(l.time).toDateString() === todayStr()).sort((a,b)=>new Date(b.time)-new Date(a.time));
+            const typeIcon = t => ({ checkin:"◈", manual:"✎", visitor:"👤", "":"◈" })[t]||"◈";
+            const typeLabel = t => ({ checkin:"Check-in", manual:"Note", visitor:"Visitor", "":"Entry" })[t]||"Entry";
+            return(
+              <div style={S.reportWrap}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+                  <div style={{fontSize:11,color:"#555"}}>{fmtDate(nowISO())}</div>
+                  <button style={S.btnPrimary} onClick={()=>setShowManualLog(true)}>+ Add Entry</button>
+                </div>
+                {todayLogs.length===0?(
+                  <div style={S.empty}>No entries yet today.<br/><br/><button style={S.btnGhost} onClick={()=>setShowManualLog(true)}>Add your first entry</button></div>
+                ):(
+                  <div>
+                    {todayLogs.map(l=>(
+                      <div key={l.id} style={{display:"flex",gap:12,padding:"10px 0",borderBottom:"1px solid #191919"}}>
+                        <div style={{fontSize:10,color:"#555",fontFamily:"monospace",whiteSpace:"nowrap",paddingTop:2,minWidth:42}}>{fmtTime(l.time)}</div>
+                        <div style={{flex:1}}>
+                          <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:3}}>
+                            <span style={{fontSize:10,color:"#444"}}>{typeIcon(l.type)}</span>
+                            <span style={{fontSize:9,color:"#555",letterSpacing:"0.08em",textTransform:"uppercase"}}>{typeLabel(l.type)}</span>
+                            {l.jobLabel&&<span style={{fontSize:9,color:"#444"}}>· {l.jobLabel}</span>}
+                          </div>
+                          <div style={{fontSize:13,color:"#c0c0c0",lineHeight:1.5}}>{l.text}</div>
+                        </div>
+                        <button style={{...S.iconBtn,color:"#2a2a2a",flexShrink:0}} onClick={async()=>{
+                          const updated = logs.filter(x=>x.id!==l.id);
+                          setLogs(updated);
+                          await sbDelete("logs", l.id);
+                        }}>✕</button>
+                      </div>
+                    ))}
+                    <div style={{marginTop:16,fontSize:11,color:"#444",textAlign:"right"}}>{todayLogs.length} entr{todayLogs.length===1?"y":"ies"} today</div>
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+
           {/* TIMESHEET */}
           {view==="timesheet"&&(()=>{
             const todayEntries = timeEntries.filter(e => e.date === new Date().toISOString().slice(0,10));
@@ -1042,34 +1111,98 @@ Sections: Completed Work (by job), In Progress (by job), Follow-Ups Required. No
             const totalKm = mileageEntries.reduce((a,e)=>a+(e.km||0),0);
             const byJob = {};
             mileageEntries.forEach(e=>{ if(!byJob[e.jobLabel])byJob[e.jobLabel]=0; byJob[e.jobLabel]+=(e.km||0); });
+            const fromLoc = savedLocations.find(l=>l.id===mileageForm.fromId);
+            const toLoc = savedLocations.find(l=>l.id===mileageForm.toId);
             return(
               <div style={S.reportWrap}>
-                {/* Add trip form */}
-                <div style={{background:"#161616",border:"1px solid #1e1e1e",borderRadius:6,padding:"16px",marginBottom:20}}>
+                {/* Log a trip */}
+                <div style={{background:"#161616",border:"1px solid #1e1e1e",borderRadius:6,padding:"16px",marginBottom:16}}>
                   <div style={{fontSize:9,color:"#555",letterSpacing:"0.12em",textTransform:"uppercase",marginBottom:12}}>Log a Trip</div>
                   <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:8}}>
-                    <input style={{...S.fInput,minWidth:140}} placeholder="From (city/address)…" value={mileageForm.from} onChange={e=>setMileageForm(f=>({...f,from:e.target.value}))}/>
-                    <input style={{...S.fInput,minWidth:140}} placeholder="To (city/address)…" value={mileageForm.to} onChange={e=>setMileageForm(f=>({...f,to:e.target.value}))}/>
-                    <button style={S.btnGhost} onClick={lookupKm} disabled={lookingUpKm}>{lookingUpKm?"Looking up…":"⊙ Lookup km"}</button>
+                    {/* FROM */}
+                    <div style={{flex:1,minWidth:140}}>
+                      <div style={{fontSize:9,color:"#555",letterSpacing:"0.08em",textTransform:"uppercase",marginBottom:4}}>From</div>
+                      <select style={{...S.fSelect,width:"100%"}} value={mileageForm.fromId} onChange={e=>{
+                        if(e.target.value==="__add__"){setAddingLocation("from");}
+                        else setMileageForm(f=>({...f,fromId:e.target.value,km:null}));
+                      }}>
+                        <option value="">Select location…</option>
+                        {savedLocations.map(l=><option key={l.id} value={l.id}>{l.name}</option>)}
+                        <option value="__add__">+ Add new location…</option>
+                      </select>
+                    </div>
+                    {/* TO */}
+                    <div style={{flex:1,minWidth:140}}>
+                      <div style={{fontSize:9,color:"#555",letterSpacing:"0.08em",textTransform:"uppercase",marginBottom:4}}>To</div>
+                      <select style={{...S.fSelect,width:"100%"}} value={mileageForm.toId} onChange={e=>{
+                        if(e.target.value==="__add__"){setAddingLocation("to");}
+                        else setMileageForm(f=>({...f,toId:e.target.value,km:null}));
+                      }}>
+                        <option value="">Select location…</option>
+                        {savedLocations.map(l=><option key={l.id} value={l.id}>{l.name}</option>)}
+                        <option value="__add__">+ Add new location…</option>
+                      </select>
+                    </div>
                   </div>
+
+                  {/* Add location inline form */}
+                  {addingLocation&&(
+                    <div style={{background:"#111",border:"1px solid #2a2a2a",borderRadius:4,padding:"12px",marginBottom:10}}>
+                      <div style={{fontSize:9,color:"#555",letterSpacing:"0.1em",textTransform:"uppercase",marginBottom:8}}>ADD LOCATION</div>
+                      <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:6}}>
+                        <input style={{...S.fInput,minWidth:130}} placeholder="Location name (e.g. Office, Site A)…" value={newLocName} onChange={e=>setNewLocName(e.target.value)} autoFocus/>
+                        <input style={{...S.fInput,flex:2,minWidth:200}} placeholder="Full address (e.g. 123 Main St, Winnipeg, MB)…" value={newLocAddress} onChange={e=>setNewLocAddress(e.target.value)} onKeyDown={e=>e.key==="Enter"&&saveLocation()}/>
+                      </div>
+                      <div style={{display:"flex",gap:6}}>
+                        <button style={S.btnPrimary} onClick={saveLocation}>Save Location</button>
+                        <button style={S.btnGhost} onClick={()=>{setAddingLocation(null);setNewLocName("");setNewLocAddress("");}}>Cancel</button>
+                      </div>
+                    </div>
+                  )}
+
                   <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:8}}>
                     <select style={S.fSelect} value={mileageForm.jobId||activeJob||""} onChange={e=>setMileageForm(f=>({...f,jobId:e.target.value}))}>
                       {activeJobs.map(j=><option key={j.id} value={j.id}>{jLabel(j)}</option>)}
                     </select>
                     <input type="date" style={S.fSelect} value={mileageForm.date} onChange={e=>setMileageForm(f=>({...f,date:e.target.value}))}/>
                     <input style={{...S.fSelect,width:80}} type="number" placeholder="km" value={mileageForm.km||""} onChange={e=>setMileageForm(f=>({...f,km:+e.target.value}))}/>
+                    <button style={S.btnGhost} onClick={lookupKm} disabled={!mileageForm.fromId||!mileageForm.toId||lookingUpKm}>
+                      {lookingUpKm?"Looking up…":"⊙ Get km"}
+                    </button>
                   </div>
+                  {fromLoc&&toLoc&&mileageForm.km&&<div style={{fontSize:11,color:"#6a6",marginBottom:8}}>✓ {fromLoc.name} → {toLoc.name}: {mileageForm.km} km</div>}
                   <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-                    <input style={{...S.fInput}} placeholder="Notes (optional)…" value={mileageForm.notes} onChange={e=>setMileageForm(f=>({...f,notes:e.target.value}))}/>
-                    <button style={S.btnPrimary} onClick={saveMileage} disabled={!mileageForm.km}>Save Trip</button>
+                    <input style={S.fInput} placeholder="Notes (optional)…" value={mileageForm.notes} onChange={e=>setMileageForm(f=>({...f,notes:e.target.value}))}/>
+                    <button style={S.btnPrimary} onClick={saveMileage} disabled={!mileageForm.km||!mileageForm.fromId||!mileageForm.toId}>Save Trip</button>
                   </div>
-                  {mileageForm.km&&<div style={{fontSize:11,color:"#6a6",marginTop:6}}>✓ {mileageForm.km} km{mileageForm.note?` — ${mileageForm.note}`:""}</div>}
                 </div>
+
+                {/* Saved locations manager */}
+                {savedLocations.length>0&&(
+                  <div style={{marginBottom:16}}>
+                    <div style={S.dashSectionTitle}>Saved Locations</div>
+                    {savedLocations.map(l=>(
+                      <div key={l.id} style={{display:"flex",alignItems:"center",gap:8,padding:"5px 0",borderBottom:"1px solid #191919"}}>
+                        <div style={{flex:1}}>
+                          <div style={{fontSize:12,color:"#c0c0c0"}}>{l.name}</div>
+                          <div style={{fontSize:10,color:"#555"}}>{l.address}</div>
+                        </div>
+                        <button style={{...S.iconBtn,color:"#444"}} onClick={()=>deleteLocation(l.id)}>✕</button>
+                      </div>
+                    ))}
+                    <button style={{...S.metaLink,marginTop:8,display:"block",fontSize:11}} onClick={()=>setAddingLocation("from")}>+ Add location</button>
+                  </div>
+                )}
+                {savedLocations.length===0&&!addingLocation&&(
+                  <div style={{marginBottom:16}}>
+                    <button style={S.btnGhost} onClick={()=>setAddingLocation("from")}>+ Add your first location</button>
+                  </div>
+                )}
 
                 {/* Totals by job */}
                 {Object.keys(byJob).length>0&&(
-                  <div style={{marginBottom:20}}>
-                    <div style={S.dashSectionTitle}>Total by Job</div>
+                  <div style={{marginBottom:16}}>
+                    <div style={S.dashSectionTitle}>Total km by Job</div>
                     {Object.entries(byJob).map(([job,km])=>(
                       <div key={job} style={{display:"flex",justifyContent:"space-between",padding:"6px 0",borderBottom:"1px solid #191919",fontSize:13}}>
                         <span style={{color:"#bbb"}}>{job}</span>
@@ -1083,7 +1216,7 @@ Sections: Completed Work (by job), In Progress (by job), Follow-Ups Required. No
                   </div>
                 )}
 
-                {/* Trip history */}
+                {/* Trip log */}
                 <div style={S.dashSectionTitle}>Trip Log</div>
                 {mileageEntries.length===0?<div style={S.empty}>No trips logged yet.</div>:
                   [...mileageEntries].reverse().map(e=>(
